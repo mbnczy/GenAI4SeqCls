@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from losses import FocalLossWithLabelSmoothing
+from .losses import FocalLossWithLabelSmoothing
 
 class SFTTrainerForSeqCLS(SFTTrainer):
     def __init__(
@@ -41,7 +41,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         labels = torch.where(labels != -100, labels, tokenizer.pad_token_id)
         
         preds = torch.argmax(logits, dim=-1)  #(batch_size, seq_length)
-    
+        print(preds)
         last_preds = []
         last_labels = []
     

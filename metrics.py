@@ -1,5 +1,6 @@
 import numpy as np
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, matthews_corrcoef, cohen_kappa_score
+
 
 def preprocess_logits_for_metrics(logits, labels):
     if isinstance(logits, tuple):
@@ -10,7 +11,7 @@ def hallucination_rate(preds, valid_labels):
     hallucinations = [pred for pred in preds if int(pred) not in valid_labels]
     return len(hallucinations) / len(preds)
 
-def compute_cls_metrics(eval_preds, true_labels, valid_labels):
+def compute_cls_metrics(eval_preds, true_labels, valid_labels, tokenizer):
     preds, labels = eval_preds
     if isinstance(preds, tuple):
         preds = preds[0]
@@ -36,5 +37,7 @@ def compute_cls_metrics(eval_preds, true_labels, valid_labels):
         "recall": round(report["weighted avg"]["recall"], 4),
         "f1": round(report["weighted avg"]["f1-score"], 4),
         "hallucination_rate": round(hallucination_rate(last_preds,valid_labels),4),
+        "matthews_corrcoef": round(matthews_corrcoef(last_preds,true_labels),4),
+        "cohen_kappa_score": round(cohen_kappa_score(last_preds,true_labels),4),
     }
   
