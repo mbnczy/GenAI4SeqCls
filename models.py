@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import sys
 
 from trl import SFTConfig, SFTTrainer, DataCollatorForCompletionOnlyLM
 
@@ -8,6 +9,46 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .losses import FocalLossWithLabelSmoothing
+import logging
+
+from dataclasses import dataclass
+from typing import Any, Dict, List
+
+from .metrics import preprocess_logits_for_metrics as preprocess
+from .metrics import compute_cls_metrics, custom_compute_metrics
+
+
+@dataclass
+class DataCollator:
+    tokenizer: Any
+    padding: bool = True
+    max_length: int = None
+    dataset_label_field: str = "label"
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        input_ids = [example["input_ids"] for example in batch]
+        attention_masks = [example["attention_mask"] for example in batch]
+        labels = [example[self.dataset_label_field] for example in batch]
+
+        batch_encoding = self.tokenizer.pad(
+            {"input_ids": input_ids, "attention_mask": attention_masks},
+            padding=self.padding,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+
+        batch_encoding["labels"] = torch.tensor(
+            [self.tokenizer(
+                str(example[self.dataset_label_field]),
+                padding=False,
+                max_length=2,
+                truncation=True,
+                return_tensors="pt"
+            )["input_ids"][-1][-1] for example in batch],
+            dtype=torch.long
+        )
+
+        return batch_encoding
 
 class SFTTrainerForSeqCLS(SFTTrainer):
     def __init__(
@@ -15,13 +56,33 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         ce_loss_weight=1.0,
         focal_loss_weight=0.0,
         num_classes=1,
+        label_balance_logic = False,
+        cl_head = True
+        dataset_label_field = 'label',
+        data_collator = None,
+        tokenizer = None,
+        preprocess_logits_for_metrics = None,
+        compute_metrics = None,
         *args, **kwargs
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            tokenizer = tokenizer,
+            preprocess_logits_for_metrics =  preprocess_logits_for_metrics if preprocess_logits_for_metrics else preprocess,
+            data_collator = data_collator if data_collator else DataCollator(
+                tokenizer=tokenizer,
+                dataset_label_field=dataset_label_field
+            ),
+            compute_metrics = compute_metrics if compute_metrics else lambda eval_preds: custom_compute_metrics(eval_preds, tokenizer.pad_token_id),
+            *args,
+            **kwargs
+        )
         self.ce_loss_weight = ce_loss_weight
         self.focal_loss_weight = focal_loss_weight
         self.num_classes = torch.tensor(num_classes, dtype=torch.float32)
-
+        
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.DEBUG)
+        
     def focal_loss(self, logits, targets):
         total_instances = self.num_classes.sum()
         class_weights = total_instances / (len(self.num_classes) * self.num_classes)
@@ -33,45 +94,27 @@ class SFTTrainerForSeqCLS(SFTTrainer):
 
         return loss
 
-    def custom_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        outputs = model(**inputs)
-        logits = outputs.logits  #(batch_size, seq_length, vocab_size)
-        labels = inputs["labels"]  #(batch_size, seq_length)
 
-        labels = torch.where(labels != -100, labels, tokenizer.pad_token_id)
-        
-        preds = torch.argmax(logits, dim=-1)  #(batch_size, seq_length)
-        print(preds)
-        last_preds = []
-        last_labels = []
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        input_ids = inputs["input_ids"]
+        labels = inputs["labels"]
+        attention_mask = inputs.get("attention_mask", None)
     
-        for i in range(preds.shape[0]):
-            valid_pred_indices = torch.where(
-                (preds[i] != tokenizer.pad_token_id) & (preds[i] != 271) & (preds[i] != 512)
-            )[0]
-            
-            valid_label_indices = torch.where(
-                (labels[i] != tokenizer.pad_token_id) & (labels[i] != 271) & (labels[i] != 512)
-            )[0]
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits  # (batch_size, seq_len, vocab_size)
     
-            if len(valid_pred_indices) > 0 and len(valid_label_indices) > 0:
-                last_preds.append(preds[i][valid_pred_indices[-1]])
-                last_labels.append(labels[i][valid_label_indices[-1]])
-    
-        if len(last_preds) == 0 or len(last_labels) == 0:
-            return torch.tensor(0.0, requires_grad=True)
-    
-        last_preds = torch.stack(last_preds)
-        last_labels = torch.stack(last_labels)
-
+        last_logits = logits[:, -1, :]
+        if labels.dim() == 2:
+            target_labels = labels[:, -1] 
+        else:
+            target_labels = labels
         loss = 0
         if self.ce_loss_weight > 0:
-            loss += self.ce_loss_weight * F.cross_entropy(last_preds.unsqueeze(0).float(), last_labels.unsqueeze(0))
+            loss += self.ce_loss_weight * F.cross_entropy(last_logits, target_labels)
         if self.focal_loss_weight > 0:
-            loss += self.focal_loss_weight * self.focal_loss(last_preds.unsqueeze(0).float(), last_labels.unsqueeze(0))
+            loss += self.focal_loss_weight * self.focal_loss(last_logits, target_labels)
             
         return (loss, outputs) if return_outputs else loss
-        
 
     def tokenize_input(self, batch, input_col):
         texts = [item[input_col] for item in batch]
@@ -82,6 +125,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             truncation=True
         ).to(self.model.device)
         return inputs
+
 
     def predict(self, test_dataset, batch_size=1, input_col="instruction", top_k=10, **kwargs):
         self.model.eval()
@@ -122,3 +166,5 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             "softmax_scores": softmax_scores,
             "top_tokens": top_tokens,
         }
+
+
