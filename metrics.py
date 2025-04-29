@@ -26,8 +26,8 @@ def compute_cls_metrics(eval_preds, true_labels, valid_labels, tokenizer):
 
     last_preds = np.array(last_preds)
     true_labels = np.array(true_labels)
-    print(f"true: {true_labels}")
-    print(f"pred: {last_preds}")
+    #print(f"true: {true_labels}")
+    #print(f"pred: {last_preds}")
     accuracy = accuracy_score(true_labels, last_preds)
     report = classification_report(true_labels, last_preds, output_dict=True, zero_division=0)
     
@@ -43,6 +43,8 @@ def compute_cls_metrics(eval_preds, true_labels, valid_labels, tokenizer):
 
 def custom_compute_metrics(eval_pred, pad_token_id = -100):
     preds, labels = eval_pred
+    
+    
     if isinstance(preds, tuple):
         preds = preds[0]
 
@@ -60,6 +62,51 @@ def custom_compute_metrics(eval_pred, pad_token_id = -100):
             )[0][-1]
         ] for i in range(preds.shape[0])
     ]
+    ## DEBUG
+    #print(preds)
+    #print(labels)
+    ##
+
+    acc = accuracy_score(labels, preds)
+    accuracy = accuracy_score(labels, preds)
+    report = classification_report(labels, preds, output_dict=True, zero_division=0)
+    
+    return {
+        "accuracy": round(accuracy, 4),
+        "precision": round(report["weighted avg"]["precision"], 4),
+        "recall": round(report["weighted avg"]["recall"], 4),
+        "f1": round(report["weighted avg"]["f1-score"], 4),
+        "hallucination_rate": round(hallucination_rate(labels, preds),4),
+        "matthews_corrcoef": round(matthews_corrcoef(labels, preds),4),
+        "cohen_kappa_score": round(cohen_kappa_score(labels, preds),4),
+    }
+
+def custom_compute_cls_metrics(eval_pred, tokenid2label, pad_token_id = -100):
+    preds, labels = eval_pred
+    
+    
+    if isinstance(preds, tuple):
+        preds = preds[0]
+
+    #preds = np.where(logits != -100, logits, tokenizer.pad_token_id)
+
+    preds = [
+        preds[i][
+            np.where(
+                np.logical_and(
+                    preds[i] != pad_token_id,
+                    #preds[i] != 271,
+                    #preds[i] != 512,
+                    preds[i] != -100,
+                )
+            )[0][-1]
+        ] for i in range(preds.shape[0])
+    ]
+    ## DEBUG
+    #print(preds)
+    labels = [tokenid2label[label] for label in labels]
+    #print(labels)
+    ##
 
     acc = accuracy_score(labels, preds)
     accuracy = accuracy_score(labels, preds)

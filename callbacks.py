@@ -33,8 +33,11 @@ class LLMSampleCallback(WandbCallback):
             logits = outputs.logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
             topk_probs, topk_indices = torch.topk(probs, k=top_k, dim=-1)
-
-            topk_tokens = [self.tokenizer.decode([idx.item()]) for idx in topk_indices[0]]
+            if self.trainer.cl_head:
+                print(self.trainer.label2tokenid)
+                topk_tokens = [self.tokenizer.decode([self.trainer.label2tokenid[idx.item()]]) for idx in topk_indices[0]]
+            else:
+                topk_tokens = [self.tokenizer.decode([idx.item()]) for idx in topk_indices[0]]
             topk_scores = topk_probs[0].tolist()
 
         for token, score in zip(topk_tokens, topk_scores):
@@ -72,11 +75,6 @@ class LLMSampleCallback(WandbCallback):
         for label in filtered_true + filtered_preds:
             assert label in class_names, f"Label {label} not in class_names!"
 
-        
-        print(y_true)
-        print(y_preds)
-        print(filtered_true)
-        print(filtered_preds)
         filtered_true = list(map(int, filtered_true))
         filtered_preds = list(map(int, filtered_preds))
         

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from .metrics import preprocess_logits_for_metrics as preprocess
-from .metrics import compute_cls_metrics, custom_compute_metrics
+from .metrics import compute_cls_metrics, custom_compute_metrics, custom_compute_cls_metrics
 
 
 @dataclass
@@ -50,14 +50,18 @@ class DataCollator:
 
         return batch_encoding
 
+
+
 class SFTTrainerForSeqCLS(SFTTrainer):
     def __init__(
         self,
+        model,
+        labels,
         ce_loss_weight=1.0,
         focal_loss_weight=0.0,
         num_classes=1,
         label_balance_logic = False,
-        cl_head = True
+        cl_head = True,
         dataset_label_field = 'label',
         data_collator = None,
         tokenizer = None,
@@ -65,23 +69,53 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         compute_metrics = None,
         *args, **kwargs
     ):
+        self.device = next(model.parameters()).device
+        self.cl_head = cl_head
+        self.processing_class = tokenizer
+        tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[0] for label in labels]
+        self.label2tokenid = dict(zip(labels, tokenized_labels))
+        self.tokenid2label = dict(zip(tokenized_labels, labels))
+        
+        if self.cl_head:
+            model = self.set_classification_head(model, tokenized_labels)
+
+        if not compute_metrics:
+            if self.cl_head:
+                compute_metrics = lambda eval_preds: custom_compute_cls_metrics(
+                    eval_preds,
+                    self.tokenid2label,
+                    tokenizer.pad_token_id
+                )
+            else:
+                compute_metrics = lambda eval_preds: custom_compute_metrics(
+                    eval_preds,
+                    tokenizer.pad_token_id
+                )
         super().__init__(
+            model = model,
             tokenizer = tokenizer,
             preprocess_logits_for_metrics =  preprocess_logits_for_metrics if preprocess_logits_for_metrics else preprocess,
             data_collator = data_collator if data_collator else DataCollator(
                 tokenizer=tokenizer,
                 dataset_label_field=dataset_label_field
             ),
-            compute_metrics = compute_metrics if compute_metrics else lambda eval_preds: custom_compute_metrics(eval_preds, tokenizer.pad_token_id),
+            compute_metrics = compute_metrics,
             *args,
             **kwargs
         )
         self.ce_loss_weight = ce_loss_weight
         self.focal_loss_weight = focal_loss_weight
         self.num_classes = torch.tensor(num_classes, dtype=torch.float32)
-        
-        self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.DEBUG)
+
+    def set_classification_head(self, model, labels):
+        #label_tokenids = [self.tokenizer.encode(str(label), add_special_tokens=False)[0] for label in labels]
+        model.lm_head.weight = torch.nn.Parameter(
+            torch.vstack(
+                [model.lm_head.weight[tokenid, :] for tokenid in labels]
+            )
+        )
+        #print(model.lm_head.weight.shape)
+        return model
         
     def focal_loss(self, logits, targets):
         total_instances = self.num_classes.sum()
@@ -108,6 +142,17 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             target_labels = labels[:, -1] 
         else:
             target_labels = labels
+
+        ## DEBUG
+        #print(last_logits)
+        #print(target_labels)
+        if self.cl_head:
+            target_labels = torch.tensor(
+                [self.tokenid2label[target_label.item()] for target_label in target_labels],
+                device = self.device
+            )
+        #print(target_labels)
+        ##
         loss = 0
         if self.ce_loss_weight > 0:
             loss += self.ce_loss_weight * F.cross_entropy(last_logits, target_labels)
@@ -149,12 +194,20 @@ class SFTTrainerForSeqCLS(SFTTrainer):
     
                 logits = outputs.logits[:, -1, :]  # (batch_size, vocab_size)
                 probs = F.softmax(logits, dim=-1)  # Apply softmax to get probabilities
-    
+                ## DEBUG
+                #print(probs)
+                ##
+                if self.cl_head and top_k>len(self.label2tokenid):
+                    top_k = len(self.label2tokenid)
+                    
                 topk_probs, topk_indices = torch.topk(probs, k=top_k, dim=-1)
     
                 batch_size = input_ids.size(0)
                 for i in range(batch_size):
-                    topk_tokens_batch = [self.processing_class.decode([idx.item()]) for idx in topk_indices[i]]
+                    if self.cl_head:
+                        topk_tokens_batch = [self.processing_class.decode([self.label2tokenid[idx.item()]]) for idx in topk_indices[i]]
+                    else:
+                        topk_tokens_batch = [self.processing_class.decode([idx.item()]) for idx in topk_indices[i]]
                     topk_scores_batch = topk_probs[i].tolist()
                 
                     predictions.append(topk_tokens_batch[0])
