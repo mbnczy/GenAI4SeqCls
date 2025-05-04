@@ -17,6 +17,12 @@ from typing import Any, Dict, List
 from .metrics import preprocess_logits_for_metrics as preprocess
 from .metrics import compute_cls_metrics, custom_compute_metrics, custom_compute_cls_metrics
 
+import faiss
+import torch
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from collections import defaultdict
+
 
 @dataclass
 class DataCollator:
@@ -67,6 +73,8 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         tokenizer = None,
         preprocess_logits_for_metrics = None,
         compute_metrics = None,
+        rag_dataset = None,
+        rag_model = 'all-MiniLM-L6-v2',
         *args, **kwargs
     ):
         self.device = next(model.parameters()).device
@@ -106,9 +114,25 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         self.ce_loss_weight = ce_loss_weight
         self.focal_loss_weight = focal_loss_weight
         self.num_classes = torch.tensor(num_classes, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                print(f"{name}: {param.grad.dtype}")
+        #for name, param in model.named_parameters():
+        #    if param.grad is not None:
+        #        print(f"{name}: {param.grad.dtype}")
+        
+        ## RAG
+        self.rag = rag_dataset is not None
+        if self.rag:
+            self.rag_model = SentenceTransformer(rag_model)
+            self.rag_label_to_texts = defaultdict(list)
+            self.rag_label_to_faiss = {}
+    
+            for text, label in zip(rag_dataset['text'], rag_dataset[dataset_label_field]):
+                self.rag_label_to_texts[label].append(text)
+    
+            for label, label_texts in self.rag_label_to_texts.items():
+                embeddings = self.rag_model.encode(label_texts, normalize_embeddings=True)
+                index = faiss.IndexFlatIP(embeddings.shape[1])
+                index.add(embeddings)
+                self.rag_label_to_faiss[label] = (index, label_texts)
 
     def set_classification_head(self, model, labels):
         #label_tokenids = [self.tokenizer.encode(str(label), add_special_tokens=False)[0] for label in labels]
@@ -174,13 +198,18 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         ).to(self.model.device)
         return inputs
 
-
-    def predict(self, test_dataset, batch_size=1, input_col="instruction", top_k=10, **kwargs):
+    def predict(self, test_dataset, batch_size=1, input_col="instruction", top_k=10, rag_weight=0.0, **kwargs):
         self.model.eval()
     
         predictions = []
         top_tokens = []
         softmax_scores = []
+    
+        model_only_predictions = []
+        model_only_scores = []
+    
+        rag_only_predictions = []
+        rag_only_scores = []
     
         dataloader = DataLoader(
             test_dataset,
@@ -188,39 +217,85 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             collate_fn=lambda batch: self.tokenize_input(batch, input_col=input_col)
         )
     
+        text_loader = DataLoader(test_dataset['text'], batch_size=batch_size)
+    
         with torch.no_grad():
-            for batch in dataloader:
-                input_ids = batch["input_ids"]
+            for batch, text_batch in zip(dataloader, text_loader):
+                input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch.get("attention_mask")
+                if attention_mask is not None:
+                    attention_mask = attention_mask.to(self.device)
     
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-    
                 logits = outputs.logits[:, -1, :]  # (batch_size, vocab_size)
-                probs = F.softmax(logits, dim=-1)  # Apply softmax to get probabilities
-                ## DEBUG
-                #print(probs)
-                ##
-                if self.cl_head and top_k>len(self.label2tokenid):
+                probs = F.softmax(logits, dim=-1)
+    
+                if self.cl_head and top_k > len(self.label2tokenid):
                     top_k = len(self.label2tokenid)
-                    
-                topk_probs, topk_indices = torch.topk(probs, k=top_k, dim=-1)
     
                 batch_size = input_ids.size(0)
+    
                 for i in range(batch_size):
                     if self.cl_head:
-                        topk_tokens_batch = [self.processing_class.decode([self.label2tokenid[idx.item()]]) for idx in topk_indices[i]]
+                        model_logits = torch.tensor(
+                            #[probs[i, self.label2tokenid[label]].item() for label in self.label2tokenid],
+                            [probs[i, j].item() for j in range(len(self.label2tokenid))],
+                            device=self.device
+                        )
+                        model_probs = F.softmax(model_logits, dim=0)
+                        labels_list = list(self.label2tokenid.keys())
                     else:
-                        topk_tokens_batch = [self.processing_class.decode([idx.item()]) for idx in topk_indices[i]]
-                    topk_scores_batch = topk_probs[i].tolist()
-                
-                    predictions.append(topk_tokens_batch[0])
-                    softmax_scores.append(topk_scores_batch[0])
-                    top_tokens.append(list(zip(topk_tokens_batch, topk_scores_batch)))
+                        model_probs = probs[i]
+                        labels_list = list(range(probs.shape[-1]))
+    
+                    model_top_val, model_top_idx = torch.max(model_probs, dim=0)
+                    model_only_predictions.append(labels_list[model_top_idx.item()])
+                    model_only_scores.append(model_top_val.item())
+    
+                    # ====== RAG similarity-based prediction ======
+                    if self.rag and rag_weight!=0.0:
+                        rag_input_text = text_batch[i]
+                        rag_sim_scores = []
+        
+                        for label in self.label2tokenid.keys():
+                            index, texts = self.rag_label_to_faiss[label]
+                            emb = self.rag_model.encode([rag_input_text], normalize_embeddings=True)
+                            sims, _ = index.search(emb, k=1)
+                            rag_sim_scores.append(sims[0][0])
+        
+                        rag_sim_tensor = torch.tensor(rag_sim_scores, device=self.device)
+                        rag_probs = F.softmax(rag_sim_tensor, dim=0)
+        
+                        rag_top_val, rag_top_idx = torch.max(rag_probs, dim=0)
+                        rag_label_list = list(self.label2tokenid.keys())
+                        rag_only_predictions.append(rag_label_list[rag_top_idx.item()])
+                        rag_only_scores.append(rag_top_val.item())
+        
+                        combined_probs = (1 - rag_weight) * model_probs + rag_weight * rag_probs
+                    else:
+                        rag_only_predictions = 0
+                        rag_only_scores = 0
+                        combined_probs = model_probs
+                    topk_combined, topk_indices_combined = torch.topk(combined_probs, k=top_k)
+    
+                    final_topk_tokens = [labels_list[j] for j in topk_indices_combined.tolist()]
+                    final_topk_scores = topk_combined.tolist()
+    
+                    predictions.append(final_topk_tokens[0])
+                    softmax_scores.append(final_topk_scores[0])
+                    top_tokens.append(list(zip(final_topk_tokens, final_topk_scores)))
     
         return {
             "predictions": predictions,
             "softmax_scores": softmax_scores,
             "top_tokens": top_tokens,
+            "model_predictions": model_only_predictions,
+            "model_scores": model_only_scores,
+            "rag_predictions": rag_only_predictions,
+            "rag_scores": rag_only_scores,
         }
-
-
+    
+        
+        
+        
+        

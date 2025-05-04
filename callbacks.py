@@ -93,7 +93,8 @@ class LLMSampleCallback(WandbCallback):
         
         results = self.trainer.predict(
             self.sample_dataset,
-            batch_size=self.batch_size
+            batch_size=self.batch_size,
+            rag_weight=0.5
         )
         examples = self.sample_dataset.to_pandas()
         
@@ -101,6 +102,8 @@ class LLMSampleCallback(WandbCallback):
         examples['y_preds'] = results['predictions']
         examples['y_probs'] = results['softmax_scores']
         examples['top_tokens'] = results['top_tokens']
+        examples["model_preds"] = list(zip(results["model_predictions"], results["model_scores"]))
+        examples["rag_preds"]=  list(zip(results["rag_predictions"], results["rag_scores"]))
 
         self._wandb.log({"sample_predictions": self.samples_table(examples)})
 
