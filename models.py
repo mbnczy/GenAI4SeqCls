@@ -105,7 +105,10 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         )
         self.ce_loss_weight = ce_loss_weight
         self.focal_loss_weight = focal_loss_weight
-        self.num_classes = torch.tensor(num_classes, dtype=torch.float32)
+        self.num_classes = torch.tensor(num_classes, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                print(f"{name}: {param.grad.dtype}")
 
     def set_classification_head(self, model, labels):
         #label_tokenids = [self.tokenizer.encode(str(label), add_special_tokens=False)[0] for label in labels]
