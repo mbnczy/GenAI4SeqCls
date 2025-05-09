@@ -23,6 +23,8 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from collections import defaultdict
 
+from tqdm.auto import tqdm
+
 
 @dataclass
 class DataCollator:
@@ -91,12 +93,14 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             if self.cl_head:
                 compute_metrics = lambda eval_preds: custom_compute_cls_metrics(
                     eval_preds,
+                    labels,
                     self.tokenid2label,
                     tokenizer.pad_token_id
                 )
             else:
                 compute_metrics = lambda eval_preds: custom_compute_metrics(
                     eval_preds,
+                    labels,
                     tokenizer.pad_token_id
                 )
         super().__init__(
@@ -113,7 +117,11 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         )
         self.ce_loss_weight = ce_loss_weight
         self.focal_loss_weight = focal_loss_weight
-        self.num_classes = torch.tensor(num_classes, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
+        self.num_classes = torch.tensor(
+            num_classes,
+            dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+            device = self.device
+        )
         #for name, param in model.named_parameters():
         #    if param.grad is not None:
         #        print(f"{name}: {param.grad.dtype}")
@@ -138,7 +146,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         #label_tokenids = [self.tokenizer.encode(str(label), add_special_tokens=False)[0] for label in labels]
         model.lm_head.weight = torch.nn.Parameter(
             torch.vstack(
-                [model.lm_head.weight[tokenid, :] for tokenid in labels]
+                [model.lm_head.weight[tokenid, :].to(torch.float32) for tokenid in labels]
             )
         )
         #print(model.lm_head.weight.shape)
@@ -163,7 +171,10 @@ class SFTTrainerForSeqCLS(SFTTrainer):
     
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits  # (batch_size, seq_len, vocab_size)
-    
+        ## DEBUG
+        #print(input_ids)
+        #print(logits[~torch.isnan(logits)])
+        ##
         last_logits = logits[:, -1, :]
         if labels.dim() == 2:
             target_labels = labels[:, -1] 
@@ -220,7 +231,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         text_loader = DataLoader(test_dataset['text'], batch_size=batch_size)
     
         with torch.no_grad():
-            for batch, text_batch in zip(dataloader, text_loader):
+            for batch, text_batch in tqdm(zip(dataloader, text_loader), desc="Processing", total=len(dataloader)):
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch.get("attention_mask")
                 if attention_mask is not None:
@@ -273,8 +284,8 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         
                         combined_probs = (1 - rag_weight) * model_probs + rag_weight * rag_probs
                     else:
-                        rag_only_predictions = 0
-                        rag_only_scores = 0
+                        rag_only_predictions.append(-1)
+                        rag_only_scores.append(-1)
                         combined_probs = model_probs
                     topk_combined, topk_indices_combined = torch.topk(combined_probs, k=top_k)
     

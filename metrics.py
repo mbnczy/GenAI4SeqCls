@@ -41,7 +41,7 @@ def compute_cls_metrics(eval_preds, true_labels, valid_labels, tokenizer):
         "cohen_kappa_score": round(cohen_kappa_score(last_preds,true_labels),4),
     }
 
-def custom_compute_metrics(eval_pred, pad_token_id = -100):
+def custom_compute_metrics(eval_pred, valid_labels, pad_token_id = -100):
     preds, labels = eval_pred
     
     
@@ -76,14 +76,13 @@ def custom_compute_metrics(eval_pred, pad_token_id = -100):
         "precision": round(report["weighted avg"]["precision"], 4),
         "recall": round(report["weighted avg"]["recall"], 4),
         "f1": round(report["weighted avg"]["f1-score"], 4),
-        "hallucination_rate": round(hallucination_rate(labels, preds),4),
+        #"hallucination_rate": round(hallucination_rate(labels, valid_labels),4),
         "matthews_corrcoef": round(matthews_corrcoef(labels, preds),4),
         "cohen_kappa_score": round(cohen_kappa_score(labels, preds),4),
     }
 
-def custom_compute_cls_metrics(eval_pred, tokenid2label, pad_token_id = -100):
+def custom_compute_cls_metrics(eval_pred, valid_labels, tokenid2label, pad_token_id = -100):
     preds, labels = eval_pred
-    
     
     if isinstance(preds, tuple):
         preds = preds[0]
@@ -103,9 +102,9 @@ def custom_compute_cls_metrics(eval_pred, tokenid2label, pad_token_id = -100):
         ] for i in range(preds.shape[0])
     ]
     ## DEBUG
-    #print(preds)
+    print(preds)
     labels = [tokenid2label[label] for label in labels]
-    #print(labels)
+    print(labels)
     ##
 
     acc = accuracy_score(labels, preds)
@@ -117,7 +116,7 @@ def custom_compute_cls_metrics(eval_pred, tokenid2label, pad_token_id = -100):
         "precision": round(report["weighted avg"]["precision"], 4),
         "recall": round(report["weighted avg"]["recall"], 4),
         "f1": round(report["weighted avg"]["f1-score"], 4),
-        "hallucination_rate": round(hallucination_rate(labels, preds),4),
+        "hallucination_rate": round(hallucination_rate(labels, valid_labels),4),
         "matthews_corrcoef": round(matthews_corrcoef(labels, preds),4),
         "cohen_kappa_score": round(cohen_kappa_score(labels, preds),4),
     }
