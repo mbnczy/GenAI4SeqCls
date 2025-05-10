@@ -25,6 +25,8 @@ from collections import defaultdict
 
 from tqdm.auto import tqdm
 
+from .balancing_methods import LabelBalancedBatchSampler
+
 
 @dataclass
 class DataCollator:
@@ -67,7 +69,6 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         labels,
         ce_loss_weight=1.0,
         focal_loss_weight=0.0,
-        num_classes=1,
         label_balance_logic = False,
         cl_head = True,
         dataset_label_field = 'label',
@@ -81,6 +82,8 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         wandb = None,
         *args, **kwargs
     ):
+        self.dataset_label_field = dataset_label_field
+        self.label_balance_logic = label_balance_logic
         self.args = args
         self.device = next(model.parameters()).device
         self.cl_head = cl_head
@@ -121,7 +124,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         self.ce_loss_weight = ce_loss_weight
         self.focal_loss_weight = focal_loss_weight
         self.num_classes = torch.tensor(
-            num_classes,
+            tokenized_labels,
             dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
             device = self.device
         )
@@ -155,6 +158,26 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         )
         #print(model.lm_head.weight.shape)
         return model
+
+    def get_train_dataloader(self):
+        if self.label_balance_logic:
+            sampler = LabelBalancedBatchSampler(
+                labels=self.train_dataset[self.dataset_label_field],
+                batch_size=self.args.per_device_train_batch_size
+            )
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.args.per_device_train_batch_size,
+                sampler=sampler,
+                collate_fn=self.data_collator,
+            )
+        else:
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.args.per_device_train_batch_size,
+                shuffle=True,
+                collate_fn=self.data_collator,
+            )
         
     def focal_loss(self, logits, targets):
         total_instances = self.num_classes.sum()
