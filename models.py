@@ -76,9 +76,12 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         preprocess_logits_for_metrics = None,
         compute_metrics = None,
         rag_dataset = None,
+        model_name_or_path=None,
         rag_model = 'all-MiniLM-L6-v2',
+        wandb = None,
         *args, **kwargs
     ):
+        self.args = args
         self.device = next(model.parameters()).device
         self.cl_head = cl_head
         self.processing_class = tokenizer
@@ -122,6 +125,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
             device = self.device
         )
+        
         #for name, param in model.named_parameters():
         #    if param.grad is not None:
         #        print(f"{name}: {param.grad.dtype}")

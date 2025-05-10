@@ -11,19 +11,35 @@ import os
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 import time
+from transformers import TrainerCallback, TrainerState, TrainerControl, TrainingArguments
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+from typing import Dict, Any
+import os
 
-class LLMSampleCallback(WandbCallback):
-    def __init__(self, trainer, test_dataset, batch_size=1, num_samples=10, max_new_tokens=256):
+#class LLMSampleCallback(WandbCallback):
+class LLMSampleCallback(TrainerCallback):
+    def __init__(
+        self,
+        #trainer,
+        wandb_run,
+        test_dataset,
+        batch_size=1,
+        #num_samples=10,
+        #max_new_tokens=256
+    ):
         "A CallBack to log samples as a wandb.Table during training"
         super().__init__()
-        self.sample_dataset = test_dataset.select(range(num_samples))
-        self.trainer = trainer
-        self.trainer.model = self.trainer.model.cuda()
-        self.tokenizer = trainer.processing_class
-        self.gen_config = GenerationConfig.from_pretrained(
-            trainer.model.name_or_path,
-            max_new_tokens=max_new_tokens
-        )
+        self.sample_dataset = test_dataset#.select(range(num_samples))
+        self.wandb_run = wandb_run
+        #self.trainer = trainer
+        #self.trainer.model = self.trainer.model.cuda()
+        #self.tokenizer = trainer.processing_class
+        #self.gen_config = GenerationConfig.from_pretrained(
+        #    trainer.model.name_or_path,
+        #    max_new_tokens=max_new_tokens
+        #)
+        #self.num_samples = num_samples
         self.batch_size = batch_size
 
     def generate(self, prompt, top_k=5):
@@ -53,18 +69,19 @@ class LLMSampleCallback(WandbCallback):
 
     def samples_table(self, examples):
         "Create a wandb.Table to store the generations"
-        records_table = wandb.Table(columns=["text", "true_label", "pred_label", "confidence", "top_k_tokens_scores"] + list(self.gen_config.to_dict().keys()))
+        records_table = wandb.Table(
+            columns=["text", "true_label", "pred_label", "confidence", "top_k_tokens_scores"]# + list(self.gen_config.to_dict().keys())
+        )
 
         for _, example in tqdm(examples.iterrows(), total=len(examples), leave=False):
             #top_token, top_score, top_k_list = self.generate(prompt=prompt)
-            
             records_table.add_data(
                 example['text'],
                 example['y_true'],
                 example['y_preds'],
                 example['y_probs'],
                 str(example['top_tokens']),
-                *list(self.gen_config.to_dict().values())
+                #*list(self.gen_config.to_dict().values())
             )
 
         return records_table
@@ -83,7 +100,7 @@ class LLMSampleCallback(WandbCallback):
         filtered_true = list(map(int, filtered_true))
         filtered_preds = list(map(int, filtered_preds))
         
-        wandb.log({
+        self.wandb_run.log({
             "confusion_matrix": wandb.plot.confusion_matrix(
                 probs=None,
                 y_true=filtered_true,
@@ -91,10 +108,24 @@ class LLMSampleCallback(WandbCallback):
                 #class_names=filtered_preds#class_names
             )
         })
+    def set_trainer(self, trainer):
+        self.trainer = trainer
 
     def on_evaluate(self, args, state, control, **kwargs):
         "Log the wandb.Table after calling trainer.evaluate"
         super().on_evaluate(args, state, control, **kwargs)
+        #self.trainer = kwargs.get("trainer", None)
+        #if self.trainer is None:
+        #    print("Trainer not passed in kwargs. Add this callback with trainer.add_callback().")
+        #    return
+        
+        #self.trainer = kwargs.get("trainer")
+        #self.trainer.model = self.trainer.model.cuda()
+        #self.tokenizer = trainer.processing_class
+        #self.gen_config = GenerationConfig.from_pretrained(
+        #    trainer.model.name_or_path,
+        #    max_new_tokens=self.max_new_tokens
+        #)
         
         results = self.trainer.predict(
             self.sample_dataset,
@@ -110,7 +141,8 @@ class LLMSampleCallback(WandbCallback):
         examples["model_preds"] = list(zip(results["model_predictions"], results["model_scores"]))
         examples["rag_preds"]=  list(zip(results["rag_predictions"], results["rag_scores"]))
 
-        self._wandb.log({"sample_predictions": self.samples_table(examples)})
+        #self._wandb.log({"sample_predictions": self.samples_table(examples)})
+        self.wandb_run.log({"sample_predictions": self.samples_table(examples)})
 
         self.log_confusion_matrix(examples['y_true'].tolist(), examples['y_preds'].tolist())
 
@@ -132,15 +164,38 @@ def custom_eta(trainer):
         
     return eta
 
-class SlackLogger:
-    def __init__(self, channel_id, slack_bot_token):
+class SlackCallback(TrainerCallback):
+    def __init__(self, channel_id: str, slack_bot_token: str, wandb_run = None):
         self.ch_id = channel_id
-        self.b_token = slack_bot_token
-        self.client = WebClient(token=self.b_token)
+        self.client = WebClient(token=slack_bot_token)
         self.main_thread = None
-
-    def init_training(self, params):
+        self.wandb_run = wandb_run
+        
+    def on_train_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
         message = f"🧬 Training started 🧬\n\n"
+        params = {}
+        if self.wandb_run:
+            params.update({
+                "WandB Run name": self.wandb_run.name,
+                "WandB link": f"https://wandb.ai/{self.wandb_run.entity}/{self.wandb_run.project}/{self.wandb_run.id}",
+            })
+            if "peft_config" in self.wandb_run.config:
+                params.update({
+                    "Model:" self.wandb_run.config.peft_config["default"]["base_model_name_or_path"]
+                })
+        params.update({
+            "Epochs": args.num_train_epochs,
+            "Train Batch size": f"{args.per_device_train_batch_size} * {args.gradient_accumulation_steps}",
+            "Eval Batch size": args.per_device_train_batch_size,
+            "Learning rate": args.learning_rate,
+            "Steps": args.max_steps if args.max_steps > 0 else "auto",
+        })
         message += "\n".join(f"- {key}: {value}" for key, value in params.items())
         try:
             response = self.client.chat_postMessage(
@@ -150,46 +205,61 @@ class SlackLogger:
             self.main_thread = response['ts']
             print(f"Slack message sent: {response['message']['text']}")
         except SlackApiError as e:
-            print(f"Error sending slack message: {e.response['error']}")
+            print(f"Error sending Slack message: {e.response['error']}")
 
-    def log_eval(self, trainer, params):
-        eta = None
-        message = f"🧬 Epoch: {round(trainer.state.epoch,1)}/{trainer.args.num_train_epochs}\t State: {round((trainer.state.global_step / trainer.state.max_steps) * 100,1)}% \tETA: {custom_eta(trainer)}\n\n"
-        message += "\n".join(f"- {key}: {value}" for key, value in params.items())
+    def on_evaluate(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        metrics: Dict[str, float],
+        **kwargs,
+    ):
+        progress = round((state.global_step / state.max_steps) * 100, 1) if state.max_steps > 0 else "n/a"
+        message = (
+            f"🧬 Epoch: {round(state.epoch, 1)}/{args.num_train_epochs} \t"
+            f"Progress: {progress}% \n\n"
+        )
+        message += "\n".join(f"- {key}: {value:.4f}" for key, value in metrics.items())
+
         try:
             reply_response = self.client.chat_postMessage(
                 channel=self.ch_id,
                 text=message,
                 thread_ts=self.main_thread
             )
-            print(f"Slack thread reply sent: {reply_response['message']['text']}")
-        
+            print(f"Slack eval update sent: {reply_response['message']['text']}")
         except SlackApiError as e:
-            print(f"Error sending slack reply: {e.response['error']}")
+            print(f"Error sending Slack evaluation message: {e.response['error']}")
 
-    def end_training(self):
-        message = "Training finished!"
+    def on_train_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
         try:
-            reply_response = self.client.chat_postMessage(
+            message = "✅ Training finished!"
+            self.client.chat_postMessage(
                 channel=self.ch_id,
                 text=message,
                 thread_ts=self.main_thread
             )
-            print(f"Slack thread reply sent: {reply_response['message']['text']}")
-
-            response = self.client.reactions_add(
+            self.client.reactions_add(
                 channel=self.ch_id,
                 timestamp=self.main_thread,
                 name="white_check_mark"
             )
-            print(f"Reaction added")
-        
+            print("Slack training completion message sent and ✅ reaction added.")
         except SlackApiError as e:
-            print(f"Error sending slack reply: {e.response['error']}")
+            print(f"Error sending training end Slack message: {e.response['error']}")
 
-
-
-    def log_cr(self, cr_path):
+    def log_cr(self, cr_path: str):
+        """Optional: Call manually to upload classification report file."""
+        if not os.path.exists(cr_path):
+            print(f"Classification report file not found: {cr_path}")
+            return
         try:
             reply_response = self.client.files_upload_v2(
                 channel=self.ch_id,
@@ -197,7 +267,23 @@ class SlackLogger:
                 title="Classification Report",
                 thread_ts=self.main_thread
             )
-            print(f"Slack thread reply sent: {reply_response['message']['text']}")
-        
+            print(f"Slack file uploaded: {reply_response['file']['name']}")
         except SlackApiError as e:
-            print(f"Error sending slack reply: {e.response['error']}")
+            print(f"Error uploading classification report: {e.response['error']}")
+            
+    def log_image(self, image_path: str):
+        """Optional: Call manually to upload classification report file."""
+        if not os.path.exists(image_path):
+            print(f"Image file not found: {image_path}")
+            return
+        try:
+            reply_response = self.client.files_upload_v2(
+                channel=self.ch_id,
+                file=image_path,
+                title=image_path,
+                thread_ts=self.main_thread
+            )
+            print(f"Slack file uploaded: {reply_response['file']['name']}")
+        except SlackApiError as e:
+            print(f"Error uploading image: {e.response['error']}")
+
