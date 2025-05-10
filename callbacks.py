@@ -187,12 +187,12 @@ class SlackCallback(TrainerCallback):
             })
             if "peft_config" in self.wandb_run.config:
                 params.update({
-                    "Model:" self.wandb_run.config.peft_config["default"]["base_model_name_or_path"]
+                    "Model": self.wandb_run.config["peft_config"]["default"]["base_model_name_or_path"]
                 })
         params.update({
             "Epochs": args.num_train_epochs,
             "Train Batch size": f"{args.per_device_train_batch_size} * {args.gradient_accumulation_steps}",
-            "Eval Batch size": args.per_device_train_batch_size,
+            "Eval Batch size": args.per_device_eval_batch_size,
             "Learning rate": args.learning_rate,
             "Steps": args.max_steps if args.max_steps > 0 else "auto",
         })
