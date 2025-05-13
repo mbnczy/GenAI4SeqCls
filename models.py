@@ -88,7 +88,13 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         self.device = next(model.parameters()).device
         self.cl_head = cl_head
         self.processing_class = tokenizer
-        tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[0] for label in labels]
+        
+        try:
+            tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[0] for label in labels]
+        except:
+            self.processing_class = self.processing_class.tokenizer
+            tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[0] for label in labels]
+            
         self.label2tokenid = dict(zip(labels, tokenized_labels))
         self.tokenid2label = dict(zip(tokenized_labels, labels))
         
@@ -107,6 +113,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                 compute_metrics = lambda eval_preds: custom_compute_metrics(
                     eval_preds,
                     labels,
+                    self.processing_class,
                     tokenizer.pad_token_id
                 )
         super().__init__(
@@ -151,11 +158,18 @@ class SFTTrainerForSeqCLS(SFTTrainer):
 
     def set_classification_head(self, model, labels):
         #label_tokenids = [self.tokenizer.encode(str(label), add_special_tokens=False)[0] for label in labels]
-        model.lm_head.weight = torch.nn.Parameter(
-            torch.vstack(
-                [model.lm_head.weight[tokenid, :].to(torch.float32) for tokenid in labels]
+        try:
+            model.lm_head.weight = torch.nn.Parameter(
+                torch.vstack(
+                    [model.lm_head.weight[tokenid, :].to(torch.float32) for tokenid in labels]
+                )
             )
-        )
+        except:
+            model.base_model.model.language_model.lm_head.weight = torch.nn.Parameter(
+                torch.vstack(
+                    [model.base_model.model.language_model.lm_head.weight[tokenid, :].to(torch.float32) for tokenid in labels]
+                )
+            )
         #print(model.lm_head.weight.shape)
         return model
 
@@ -216,6 +230,16 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                 [self.tokenid2label[target_label.item()] for target_label in target_labels],
                 device = self.device
             )
+        else:
+            target_labels = self.processing_class.batch_decode(
+                target_labels.unsqueeze(1), skip_special_tokens=True
+            )
+
+            target_labels = torch.tensor(
+                [self.processing_class.convert_tokens_to_ids(label.strip()) for label in target_labels],
+                device=self.device
+            )
+            
         #print(target_labels)
         ##
         loss = 0
@@ -284,9 +308,14 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                         labels_list = list(self.label2tokenid.keys())
                     else:
                         model_probs = probs[i]
-                        labels_list = list(range(probs.shape[-1]))
+                        labels_list = [
+                            self.processing_class.decode([j], skip_special_tokens=True).strip()
+                            for j in range(probs.shape[-1])
+                        ]
+                        #labels_list = list(range(probs.shape[-1]))
     
                     model_top_val, model_top_idx = torch.max(model_probs, dim=0)
+
                     model_only_predictions.append(labels_list[model_top_idx.item()])
                     model_only_scores.append(model_top_val.item())
     
