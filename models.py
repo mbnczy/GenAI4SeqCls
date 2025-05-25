@@ -66,7 +66,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
     def __init__(
         self,
         model,
-        labels,
+        id2label,
         ce_loss_weight=1.0,
         focal_loss_weight=0.0,
         label_balance_logic = False,
@@ -82,13 +82,14 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         wandb = None,
         *args, **kwargs
     ):
+        labels = list(id2label.keys())
         self.dataset_label_field = dataset_label_field
         self.label_balance_logic = label_balance_logic
         self.args = args
         self.device = next(model.parameters()).device
         self.cl_head = cl_head
         self.processing_class = tokenizer
-        
+        self.id2label = id2label
         try:
             tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[0] for label in labels]
         except:
@@ -225,6 +226,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         ## DEBUG
         #print(last_logits)
         #print(target_labels)
+        ##
         if self.cl_head:
             target_labels = torch.tensor(
                 [self.tokenid2label[target_label.item()] for target_label in target_labels],
@@ -240,8 +242,6 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                 device=self.device
             )
             
-        #print(target_labels)
-        ##
         loss = 0
         if self.ce_loss_weight > 0:
             loss += self.ce_loss_weight * F.cross_entropy(last_logits, target_labels)
@@ -260,18 +260,132 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         ).to(self.model.device)
         return inputs
 
+#    def predict(self, test_dataset, batch_size=1, input_col="instruction", top_k=10, rag_weight=0.0, **kwargs):
+#        self.model.eval()
+#    
+#        predictions = []
+#        top_tokens = []
+#        softmax_scores = []
+#    
+#        model_only_predictions = []
+#        model_only_scores = []
+#    
+#        rag_only_predictions = []
+#        rag_only_scores = []
+#    
+#        dataloader = DataLoader(
+#            test_dataset,
+#            batch_size=batch_size,
+#            collate_fn=lambda batch: self.tokenize_input(batch, input_col=input_col)
+#        )
+#    
+#        text_loader = DataLoader(test_dataset['text'], batch_size=batch_size)
+#    
+#        with torch.no_grad():
+#            for batch, text_batch in tqdm(zip(dataloader, text_loader), desc="Processing", total=len(dataloader)):
+#                input_ids = batch["input_ids"].to(self.device)
+#                attention_mask = batch.get("attention_mask")
+#                if attention_mask is not None:
+#                    attention_mask = attention_mask.to(self.device)
+#    
+#                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+#                logits = outputs.logits[:, -1, :]  # (batch_size, vocab_size)
+#                probs = F.softmax(logits, dim=-1)
+#    
+#                if self.cl_head and top_k > len(self.label2tokenid):
+#                    top_k = len(self.label2tokenid)
+#    
+#                batch_size = input_ids.size(0)
+#    
+#                for i in range(batch_size):
+#                    if self.cl_head:
+#                        model_logits = torch.tensor(
+#                            #[probs[i, self.label2tokenid[label]].item() for label in self.label2tokenid],
+#                            [probs[i, j].item() for j in range(len(self.label2tokenid))],
+#                            device=self.device
+#                        )
+#                        model_probs = F.softmax(model_logits, dim=0)
+#                        labels_list = list(self.label2tokenid.keys())
+#                    #else:
+#                    #    model_probs = probs[i]
+#                    #    labels_list = [
+#                    #        self.processing_class.decode([j], skip_special_tokens=True).strip()
+#                    #        for j in range(probs.shape[-1])
+#                    #    ]
+#                    #    #labels_list = list(range(probs.shape[-1]))
+#                    else:
+#                        label_token_ids = [self.label2tokenid[label] for label in self.label2tokenid]
+#                        model_probs = probs[i][label_token_ids]
+#                        model_probs = F.softmax(model_probs, dim=0)
+#                        labels_list = list(self.label2tokenid.keys())
+#
+#    
+#                    model_top_val, model_top_idx = torch.max(model_probs, dim=0)
+#
+#                    model_only_predictions.append(labels_list[model_top_idx.item()])
+#                    model_only_scores.append(model_top_val.item())
+#    
+#                    # ====== RAG similarity-based prediction ======
+#                    if self.rag and rag_weight!=0.0:
+#                        rag_input_text = text_batch[i]
+#                        rag_sim_scores = []
+#        
+#                        for label in self.label2tokenid.keys():
+#                            index, texts = self.rag_label_to_faiss[label]
+#                            emb = self.rag_model.encode([rag_input_text], normalize_embeddings=True)
+#                            sims, _ = index.search(emb, k=1)
+#                            rag_sim_scores.append(sims[0][0])
+#        
+#                        rag_sim_tensor = torch.tensor(rag_sim_scores, device=self.device)
+#                        rag_probs = F.softmax(rag_sim_tensor, dim=0)
+#        
+#                        rag_top_val, rag_top_idx = torch.max(rag_probs, dim=0)
+#                        rag_label_list = list(self.label2tokenid.keys())
+#                        rag_only_predictions.append(rag_label_list[rag_top_idx.item()])
+#                        rag_only_scores.append(rag_top_val.item())
+#        
+#                        combined_probs = (1 - rag_weight) * model_probs + rag_weight * rag_probs
+#                    else:
+#                        rag_only_predictions.append(-1)
+#                        rag_only_scores.append(-1)
+#                        combined_probs = model_probs
+#
+#                    if top_k > combined_probs.shape[0]:
+#                        top_k = combined_probs.shape[0]
+#                        
+#                    topk_combined, topk_indices_combined = torch.topk(combined_probs, k=top_k)
+#    
+#                    final_topk_tokens = [labels_list[j] for j in topk_indices_combined.tolist()]
+#                    final_topk_scores = topk_combined.tolist()
+#    
+#                    predictions.append(final_topk_tokens[0])
+#                    softmax_scores.append(final_topk_scores[0])
+#                    top_tokens.append(list(zip(final_topk_tokens, final_topk_scores)))
+#    
+#        return {
+#            "predictions": predictions,
+#            "softmax_scores": softmax_scores,
+#            "top_tokens": top_tokens,
+#            "model_predictions": model_only_predictions,
+#            "model_scores": model_only_scores,
+#            "rag_predictions": rag_only_predictions,
+#            "rag_scores": rag_only_scores,
+#        }
+    
     def predict(self, test_dataset, batch_size=1, input_col="instruction", top_k=10, rag_weight=0.0, **kwargs):
         self.model.eval()
     
         predictions = []
-        top_tokens = []
         softmax_scores = []
+        top_tokens = []
     
         model_only_predictions = []
         model_only_scores = []
+        model_only_top_tokens = []
     
         rag_only_predictions = []
         rag_only_scores = []
+        rag_only_top_tokens = []
     
         dataloader = DataLoader(
             test_dataset,
@@ -307,43 +421,51 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                         model_probs = F.softmax(model_logits, dim=0)
                         labels_list = list(self.label2tokenid.keys())
                     else:
-                        model_probs = probs[i]
-                        labels_list = [
-                            self.processing_class.decode([j], skip_special_tokens=True).strip()
-                            for j in range(probs.shape[-1])
-                        ]
-                        #labels_list = list(range(probs.shape[-1]))
+                        label_token_ids = [self.label2tokenid[label] for label in self.label2tokenid]
+                        model_probs = probs[i][label_token_ids]
+                        model_probs = F.softmax(model_probs, dim=0)
+                        labels_list = list(self.label2tokenid.keys())
     
-                    model_top_val, model_top_idx = torch.max(model_probs, dim=0)
-
-                    model_only_predictions.append(labels_list[model_top_idx.item()])
-                    model_only_scores.append(model_top_val.item())
+                    # ===== Model-only top-k =====
+                    model_topk_vals, model_topk_idxs = torch.topk(model_probs, k=min(top_k, model_probs.shape[0]))
+                    model_only_predictions.append(labels_list[model_topk_idxs[0].item()])
+                    model_only_scores.append(model_topk_vals[0].item())
+                    model_only_top_tokens.append(list(zip([labels_list[j] for j in model_topk_idxs.tolist()],
+                                                          model_topk_vals.tolist())))
     
-                    # ====== RAG similarity-based prediction ======
-                    if self.rag and rag_weight!=0.0:
+                    # ===== RAG-only prediction (optional) =====
+                    if self.rag and rag_weight != 0.0:
                         rag_input_text = text_batch[i]
                         rag_sim_scores = []
-        
+    
                         for label in self.label2tokenid.keys():
-                            index, texts = self.rag_label_to_faiss[label]
+                            index, _ = self.rag_label_to_faiss[label]
                             emb = self.rag_model.encode([rag_input_text], normalize_embeddings=True)
                             sims, _ = index.search(emb, k=1)
                             rag_sim_scores.append(sims[0][0])
-        
+    
                         rag_sim_tensor = torch.tensor(rag_sim_scores, device=self.device)
                         rag_probs = F.softmax(rag_sim_tensor, dim=0)
-        
-                        rag_top_val, rag_top_idx = torch.max(rag_probs, dim=0)
-                        rag_label_list = list(self.label2tokenid.keys())
-                        rag_only_predictions.append(rag_label_list[rag_top_idx.item()])
-                        rag_only_scores.append(rag_top_val.item())
-        
+    
+                        rag_topk_vals, rag_topk_idxs = torch.topk(rag_probs, k=min(top_k, rag_probs.shape[0]))
+                        rag_labels_list = list(self.label2tokenid.keys())
+    
+                        rag_only_predictions.append(rag_labels_list[rag_topk_idxs[0].item()])
+                        rag_only_scores.append(rag_topk_vals[0].item())
+                        rag_only_top_tokens.append(list(zip([rag_labels_list[j] for j in rag_topk_idxs.tolist()],
+                                                            rag_topk_vals.tolist())))
+    
+                        # ===== Combine model & rag =====
                         combined_probs = (1 - rag_weight) * model_probs + rag_weight * rag_probs
                     else:
                         rag_only_predictions.append(-1)
                         rag_only_scores.append(-1)
+                        rag_only_top_tokens.append([])
                         combined_probs = model_probs
-                    topk_combined, topk_indices_combined = torch.topk(combined_probs, k=top_k)
+    
+                    # ===== Final combined prediction =====
+                    top_k_eff = min(top_k, combined_probs.shape[0])
+                    topk_combined, topk_indices_combined = torch.topk(combined_probs, k=top_k_eff)
     
                     final_topk_tokens = [labels_list[j] for j in topk_indices_combined.tolist()]
                     final_topk_scores = topk_combined.tolist()
@@ -356,13 +478,17 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             "predictions": predictions,
             "softmax_scores": softmax_scores,
             "top_tokens": top_tokens,
+    
             "model_predictions": model_only_predictions,
             "model_scores": model_only_scores,
+            "model_top_tokens": model_only_top_tokens,
+    
             "rag_predictions": rag_only_predictions,
             "rag_scores": rag_only_scores,
+            "rag_top_tokens": rag_only_top_tokens,
         }
-    
-        
+
+
         
         
         

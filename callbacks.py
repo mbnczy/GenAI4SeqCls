@@ -16,6 +16,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from typing import Dict, Any
 import os
+from sklearn.metrics import precision_recall_fscore_support
 
 #class LLMSampleCallback(WandbCallback):
 class LLMSampleCallback(TrainerCallback):
@@ -70,7 +71,7 @@ class LLMSampleCallback(TrainerCallback):
     def samples_table(self, examples):
         "Create a wandb.Table to store the generations"
         records_table = wandb.Table(
-            columns=["text", "true_label", "pred_label", "confidence", "top_k_tokens_scores"]# + list(self.gen_config.to_dict().keys())
+            columns=["text", "true_label", "pred_label", "confidence", "top_k_tokens_scores", "model_pred","rag_pred","model_score","rag_score","model_top_tokens","rag_top_tokens"]# + list(self.gen_config.to_dict().keys())
         )
 
         for _, example in tqdm(examples.iterrows(), total=len(examples), leave=False):
@@ -81,12 +82,18 @@ class LLMSampleCallback(TrainerCallback):
                 example['y_preds'],
                 example['y_probs'],
                 str(example['top_tokens']),
+                example["model_preds"],
+                example["rag_preds"],
+                example['model_scores'],
+                example['rag_scores'],
+                str(example['model_top_tokens']),
+                str(example['rag_top_tokens']),
                 #*list(self.gen_config.to_dict().values())
             )
 
         return records_table
 
-    def log_confusion_matrix(self, y_true, y_preds):
+    def log_confusion_matrix(self, y_true, y_preds, plot_name = "confusion_matrix", label_names=None):
         filtered_true, filtered_preds = zip(*[
             (y, p) for y, p in zip(y_true, y_preds)
             if str(p).isdigit()
@@ -101,10 +108,11 @@ class LLMSampleCallback(TrainerCallback):
         filtered_preds = list(map(int, filtered_preds))
         
         self.wandb_run.log({
-            "confusion_matrix": wandb.plot.confusion_matrix(
+            plot_name: wandb.plot.confusion_matrix(
                 probs=None,
                 y_true=filtered_true,
                 preds=filtered_preds,
+                title=plot_name
                 #class_names=filtered_preds#class_names
             )
         })
@@ -138,13 +146,89 @@ class LLMSampleCallback(TrainerCallback):
         examples['y_preds'] = results['predictions']
         examples['y_probs'] = results['softmax_scores']
         examples['top_tokens'] = results['top_tokens']
-        examples["model_preds"] = list(zip(results["model_predictions"], results["model_scores"]))
-        examples["rag_preds"]=  list(zip(results["rag_predictions"], results["rag_scores"]))
+        examples['model_preds'] = results['model_predictions'] #list(zip(results["model_predictions"], results["model_scores"]))
+        examples['rag_preds'] = results['rag_predictions'] #list(zip(results["rag_predictions"], results["rag_scores"]))
+        examples['model_scores'] = results['model_scores']
+        examples['rag_scores'] = results['rag_scores']
+        examples['model_top_tokens'] = results['model_top_tokens']
+        examples['rag_top_tokens'] = results['rag_top_tokens']
 
         #self._wandb.log({"sample_predictions": self.samples_table(examples)})
         self.wandb_run.log({"sample_predictions": self.samples_table(examples)})
 
-        self.log_confusion_matrix(examples['y_true'].tolist(), examples['y_preds'].tolist())
+        self.log_confusion_matrix(
+            [self.trainer.id2label[int(i)] for i in examples['y_true'].tolist()],
+            [self.trainer.id2label[int(i)] for i in examples['y_preds'].tolist()]
+        )
+        self.log_confusion_matrix(
+            [self.trainer.id2label[int(i)] for i in examples['y_true'].tolist()],
+            [self.trainer.id2label[int(i)] for i in examples['model_preds'].tolist()],
+            "model_predictions"
+        )
+        if self.trainer.rag:
+            self.log_confusion_matrix(
+                [self.trainer.id2label[int(i)] for i in examples['y_true'].tolist()],
+                [self.trainer.id2label[int(i)] for i in examples['rag_preds'].tolist()],
+                "rag_predictions"
+            )
+        
+
+    def log_predictions(self, results, test_dataset=None):
+        if test_dataset:
+            self.sample_dataset = test_dataset
+        examples = self.sample_dataset.to_pandas()
+        
+        examples['y_true'] = [element['label'] for element in self.sample_dataset]
+        examples['y_preds'] = results['predictions']
+        examples['y_probs'] = results['softmax_scores']
+        examples['top_tokens'] = results['top_tokens']
+        examples['model_preds'] = results['model_predictions'] #list(zip(results["model_predictions"], results["model_scores"]))
+        examples['rag_preds'] = results['rag_predictions'] #list(zip(results["rag_predictions"], results["rag_scores"]))
+        examples['model_scores'] = results['model_scores']
+        examples['rag_scores'] = results['rag_scores']
+        examples['model_top_tokens'] = results['model_top_tokens']
+        examples['rag_top_tokens'] = results['rag_top_tokens']
+
+        self.wandb_run.log({"sample_predictions": self.samples_table(examples)})
+
+        self.log_confusion_matrix(
+            [self.trainer.id2label[int(i)] for i in examples['y_true'].tolist()],
+            [self.trainer.id2label[int(i)] for i in examples['y_preds'].tolist()]
+        )
+        self.log_confusion_matrix(
+            [self.trainer.id2label[int(i)] for i in examples['y_true'].tolist()],
+            [self.trainer.id2label[int(i)] for i in examples['model_preds'].tolist()],
+            "model_predictions"
+        )
+        if self.trainer.rag:
+            self.log_confusion_matrix(
+                [self.trainer.id2label[int(i)] for i in examples['y_true'].tolist()],
+                [self.trainer.id2label[int(i)] for i in examples['rag_preds'].tolist()],
+                "rag_predictions"
+            )
+
+        try:
+            y_true = list(map(int, examples['y_true']))
+            y_pred = list(map(int, examples['y_preds']))
+    
+            precision, recall, f1_scores, support = precision_recall_fscore_support(
+                y_true, y_pred, labels=sorted(set(y_true)), zero_division=0
+            )
+            class_ids = sorted(set(y_true))
+    
+            data = [[cid, f1] for cid, f1 in zip(class_ids, f1_scores)]
+            table = wandb.Table(data=data, columns=["Class ID", "F1 Score"])
+    
+            self.wandb_run.log({
+                "f1_score_per_class": wandb.plot.scatter(
+                    table,
+                    x="Class ID",
+                    y="F1 Score",
+                    title="F1 Score per Class"
+                )
+            })
+        except Exception as e:
+            print(f"⚠️ Failed to log F1 scatter plot: {e}")
 
 
 def custom_eta(trainer):
@@ -182,8 +266,7 @@ class SlackCallback(TrainerCallback):
         params = {}
         if self.wandb_run:
             params.update({
-                "WandB Run name": self.wandb_run.name,
-                "WandB link": f"https://wandb.ai/{self.wandb_run.entity}/{self.wandb_run.project}/{self.wandb_run.id}",
+                "WandB Run": f"<https://wandb.ai/{self.wandb_run.entity}/{self.wandb_run.project}/{self.wandb_run.id}|{self.wandb_run.name}>",
             })
             if "peft_config" in self.wandb_run.config:
                 params.update({
@@ -200,7 +283,8 @@ class SlackCallback(TrainerCallback):
         try:
             response = self.client.chat_postMessage(
                 channel=self.ch_id,
-                text=message
+                text=message,
+                mrkdwn=True
             )
             self.main_thread = response['ts']
             print(f"Slack message sent: {response['message']['text']}")

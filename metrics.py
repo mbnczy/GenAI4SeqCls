@@ -7,8 +7,15 @@ def preprocess_logits_for_metrics(logits, labels):
     return logits.argmax(dim=-1)
 
 def hallucination_rate(preds, valid_labels):
-    hallucinations = [pred for pred in preds if int(pred) not in valid_labels]
-    return len(hallucinations) / len(preds)
+    cleaned_preds = []
+    for pred in preds:
+        try:
+            cleaned_preds.append(int(str(pred).strip()))
+        except (ValueError, TypeError):
+            cleaned_preds.append(-1)
+
+    hallucinations = [pred for pred in cleaned_preds if pred not in valid_labels]
+    return len(hallucinations) / len(preds) if preds else 0.0
 
 def compute_cls_metrics(eval_preds, true_labels, valid_labels, tokenizer):
     preds, labels = eval_preds
@@ -63,30 +70,23 @@ def custom_compute_metrics(eval_pred, valid_labels, tokenizer, pad_token_id = -1
         ] for i in range(preds.shape[0])
     ]
 
-    preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-    
-    cleaned_preds = []
-    for p in preds:
-        try:
-            cleaned_preds.append(int(p.strip()))
-        except:
-            cleaned_preds.append(-1)
     ## DEBUG
     #print(preds)
+    #print(cleaned_preds)
     #print(labels)
     ##
 
-    accuracy = accuracy_score(labels, cleaned_preds)
-    report = classification_report(labels, cleaned_preds, output_dict=True, zero_division=0)
+    accuracy = accuracy_score(labels, preds)
+    report = classification_report(labels, preds, output_dict=True, zero_division=0)
     
     out_dict = {
         "accuracy": round(accuracy, 4),
         "precision": round(report["weighted avg"]["precision"], 4),
         "recall": round(report["weighted avg"]["recall"], 4),
         "f1": round(report["weighted avg"]["f1-score"], 4),
-        "hallucination_rate": round(hallucination_rate(cleaned_preds, valid_labels),4),
-        "matthews_corrcoef": round(matthews_corrcoef(labels, cleaned_preds),4),
-        "cohen_kappa_score": round(cohen_kappa_score(labels, cleaned_preds),4),
+        "hallucination_rate": round(hallucination_rate(tokenizer.batch_decode(preds, skip_special_tokens=True), valid_labels),4),
+        "matthews_corrcoef": round(matthews_corrcoef(labels, preds),4),
+        "cohen_kappa_score": round(cohen_kappa_score(labels, preds),4),
     }
     
     return out_dict
