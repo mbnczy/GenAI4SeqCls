@@ -371,3 +371,29 @@ class SlackCallback(TrainerCallback):
         except SlackApiError as e:
             print(f"Error uploading image: {e.response['error']}")
 
+    def on_test(self, model, test_set_name):
+        message = f"🧬 Evaluation started 🧬\n\n"
+        params = {}
+        if self.wandb_run:
+            params.update({
+                "WandB Run": f"<https://wandb.ai/{self.wandb_run.entity}/{self.wandb_run.project}/{self.wandb_run.id}|{self.wandb_run.name}>",
+            })
+            if "peft_config" in self.wandb_run.config:
+                params.update({
+                    "Model": self.wandb_run.config["peft_config"]["default"]["base_model_name_or_path"]
+                })
+        params.update({
+            "Model": model,
+            "Eval Set": test_set_name,
+        })
+        message += "\n".join(f"- {key}: {value}" for key, value in params.items())
+        try:
+            response = self.client.chat_postMessage(
+                channel=self.ch_id,
+                text=message,
+                mrkdwn=True
+            )
+            self.main_thread = response['ts']
+            print(f"Slack message sent: {response['message']['text']}")
+        except SlackApiError as e:
+            print(f"Error sending Slack message: {e.response['error']}")

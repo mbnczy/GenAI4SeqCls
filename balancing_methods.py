@@ -13,7 +13,9 @@ class LabelBalancedBatchSampler(Sampler):
             self.label_to_indices[label].append(idx)
         
         self.num_labels = len(set(labels))
-        assert self.batch_size >= self.num_labels,
+        assert self.batch_size >= self.num_labels, (
+            f"Batch size ({self.batch_size}) must be at least the number of unique labels ({self.num_labels})"
+        )
 
     def __iter__(self):
         label_indices = {label: indices[:] for label, indices in self.label_to_indices.items()}

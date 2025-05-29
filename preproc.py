@@ -1,4 +1,18 @@
 from datasets import Dataset
+def preprocess_text(example, tokenizer, max_seq_length, text_col='text', label_col='label'):
+    instruction = example[text_col]
+    tokenized = tokenizer(
+        instruction,
+        truncation=True,
+        max_length=max_seq_length
+    )
+    tokenized["instruction"]=instruction
+    tokenized["output"] = tokenizer(
+        str(example[label_col]),
+        add_special_tokens=False
+    )["input_ids"][0]
+
+    return tokenized
 
 def preprocess_instruction(example, prompt_template, tokenizer, max_seq_length, text_col='text', label_col='label'):
     """
