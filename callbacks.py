@@ -301,7 +301,7 @@ class SlackCallback(TrainerCallback):
     ):
         progress = round((state.global_step / state.max_steps) * 100, 1) if state.max_steps > 0 else "n/a"
         message = (
-            f"🧬 Epoch: {round(state.epoch, 1)}/{args.num_train_epochs} \t"
+            f"🧬 Epoch: {round(state.epoch, 1) if state.epoch is not None else '-'}/{args.num_train_epochs if args.num_train_epochs is not None else '-'} \t"
             f"Progress: {progress}% \n\n"
         )
         message += "\n".join(f"- {key}: {value:.4f}" for key, value in metrics.items())

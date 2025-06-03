@@ -28,37 +28,74 @@ from tqdm.auto import tqdm
 from .balancing_methods import LabelBalancedBatchSampler
 
 
+#@dataclass
+#class DataCollator:
+#    tokenizer: Any
+#    label2tokenid: dict
+#    padding: bool = True
+#    max_length: int = None
+#    dataset_label_field: str = "label"
+#
+#    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+#        input_ids = [example["input_ids"] for example in batch]
+#        attention_masks = [example["attention_mask"] for example in batch]
+#        labels = [example[self.dataset_label_field] for example in batch]
+#
+#        batch_encoding = self.tokenizer.pad(
+#            {"input_ids": input_ids, "attention_mask": attention_masks},
+#            padding=self.padding,
+#            max_length=self.max_length,
+#            return_tensors="pt",
+#        )
+#
+#        #batch_encoding["labels"] = torch.tensor(
+#        #    [self.tokenizer(
+#        #        str(example[self.dataset_label_field]),
+#        #        padding=False,
+#        #        max_length=2,
+#        #        truncation=True,
+#        #        return_tensors="pt"
+#        #    )["input_ids"][-1][-1] for example in batch],
+#        #    dtype=torch.long
+#        #)
+#        batch_encoding["labels"] = torch.tensor([self.label2tokenid[int(example[self.dataset_label_field])] for example in batch], dtype=torch.long)
+#
+#        return batch_encoding
 @dataclass
 class DataCollator:
     tokenizer: Any
+    label2tokenid: dict
     padding: bool = True
     max_length: int = None
     dataset_label_field: str = "label"
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        # Extract fields in original order
         input_ids = [example["input_ids"] for example in batch]
         attention_masks = [example["attention_mask"] for example in batch]
-        labels = [example[self.dataset_label_field] for example in batch]
+        labels_raw = [example[self.dataset_label_field] for example in batch]
+        labels = torch.tensor(
+            [self.label2tokenid[label] for label in labels_raw],
+            dtype=torch.long
+        )
 
+        # Confirm order is maintained
+        #print(f"{labels_raw}->{labels.tolist()}")
+
+        # Pad input sequences
         batch_encoding = self.tokenizer.pad(
-            {"input_ids": input_ids, "attention_mask": attention_masks},
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_masks,
+            },
             padding=self.padding,
             max_length=self.max_length,
             return_tensors="pt",
         )
 
-        batch_encoding["labels"] = torch.tensor(
-            [self.tokenizer(
-                str(example[self.dataset_label_field]),
-                padding=False,
-                max_length=2,
-                truncation=True,
-                return_tensors="pt"
-            )["input_ids"][-1][-1] for example in batch],
-            dtype=torch.long
-        )
-
+        batch_encoding["labels"] = labels
         return batch_encoding
+
 
 
 
@@ -89,12 +126,18 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         self.device = next(model.parameters()).device
         self.cl_head = cl_head
         self.processing_class = tokenizer
+        #self.processing_class.add_tokens(sorted(set(str(label) for label in labels)))
+        new_tokens = [str(t) for t in labels if str(t) not in set(self.processing_class.get_vocab().keys())]
+        if len(new_tokens)>0:
+            self.processing_class.add_tokens(new_tokens)
+            model.resize_token_embeddings(len(self.processing_class))
+
         self.id2label = id2label
         try:
-            tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[0] for label in labels]
+            tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[-1] for label in labels]
         except:
             self.processing_class = self.processing_class.tokenizer
-            tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[0] for label in labels]
+            tokenized_labels = [self.processing_class.encode(str(label), add_special_tokens=False)[-1] for label in labels]
             
         self.label2tokenid = dict(zip(labels, tokenized_labels))
         self.tokenid2label = dict(zip(tokenized_labels, labels))
@@ -108,22 +151,23 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                     eval_preds,
                     labels,
                     self.tokenid2label,
-                    tokenizer.pad_token_id
+                    self.processing_class.pad_token_id
                 )
             else:
                 compute_metrics = lambda eval_preds: custom_compute_metrics(
                     eval_preds,
                     labels,
                     self.processing_class,
-                    tokenizer.pad_token_id
+                    self.processing_class.pad_token_id
                 )
         super().__init__(
             model = model,
-            tokenizer = tokenizer,
+            tokenizer = self.processing_class,
             preprocess_logits_for_metrics =  preprocess_logits_for_metrics if preprocess_logits_for_metrics else preprocess,
             data_collator = data_collator if data_collator else DataCollator(
-                tokenizer=tokenizer,
-                dataset_label_field=dataset_label_field
+                tokenizer=self.processing_class,
+                dataset_label_field=dataset_label_field,
+                label2tokenid = self.label2tokenid
             ),
             compute_metrics = compute_metrics,
             *args,
@@ -374,6 +418,9 @@ class SFTTrainerForSeqCLS(SFTTrainer):
     
     def predict(self, test_dataset, batch_size=1, input_col="instruction", top_k=10, rag_weight=0.0, **kwargs):
         self.model.eval()
+        assert not self.model.training
+        print(self.label2tokenid)
+
     
         predictions = []
         softmax_scores = []
@@ -386,14 +433,21 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         rag_only_predictions = []
         rag_only_scores = []
         rag_only_top_tokens = []
+
+        print("test_Dataset order")
+        print(test_dataset["label"])
     
         dataloader = DataLoader(
             test_dataset,
             batch_size=batch_size,
-            collate_fn=lambda batch: self.tokenize_input(batch, input_col=input_col)
+            collate_fn=self.data_collator,
+            shuffle=False,
+            num_workers=0
         )
+        print("Dataloader order")
+        print([batch["labels"] for batch in dataloader])
     
-        text_loader = DataLoader(test_dataset['text'], batch_size=batch_size)
+        text_loader = DataLoader(test_dataset['text'], batch_size=batch_size, shuffle=False, num_workers=0)
     
         with torch.no_grad():
             for batch, text_batch in tqdm(zip(dataloader, text_loader), desc="Processing", total=len(dataloader)):
@@ -430,8 +484,8 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                     model_topk_vals, model_topk_idxs = torch.topk(model_probs, k=min(top_k, model_probs.shape[0]))
                     model_only_predictions.append(labels_list[model_topk_idxs[0].item()])
                     model_only_scores.append(model_topk_vals[0].item())
-                    model_only_top_tokens.append(list(zip([labels_list[j] for j in model_topk_idxs.tolist()],
-                                                          model_topk_vals.tolist())))
+                    model_only_top_tokens.append(list(zip([labels_list[j] for j in model_topk_idxs.tolist()],model_topk_vals.tolist())))
+
     
                     # ===== RAG-only prediction (optional) =====
                     if self.rag and rag_weight != 0.0:
@@ -465,6 +519,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
     
                     # ===== Final combined prediction =====
                     top_k_eff = min(top_k, combined_probs.shape[0])
+
                     topk_combined, topk_indices_combined = torch.topk(combined_probs, k=top_k_eff)
     
                     final_topk_tokens = [labels_list[j] for j in topk_indices_combined.tolist()]
@@ -487,6 +542,56 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             "rag_scores": rag_only_scores,
             "rag_top_tokens": rag_only_top_tokens,
         }
+#    def predict(self, test_dataset, batch_size=1, input_col="instruction", pad_token_id=-100, **kwargs):
+#        self.model.eval()
+#        assert not self.model.training
+#    
+#        predictions = []
+#        decoded_predictions = []
+#    
+#        dataloader = DataLoader(
+#            test_dataset,
+#            batch_size=batch_size,
+#            collate_fn=self.data_collator,
+#            shuffle=False
+#        )
+#    
+#        with torch.no_grad():
+#            for batch in tqdm(dataloader, desc="Predicting"):
+#                input_ids = batch["input_ids"].to(self.device)
+#                attention_mask = batch.get("attention_mask")
+#                if attention_mask is not None:
+#                    attention_mask = attention_mask.to(self.device)
+#    
+#                outputs = self.model.generate(
+#                    input_ids=input_ids,
+#                    attention_mask=attention_mask,
+#                    max_new_tokens=10,
+#                    do_sample=False
+#                )
+#
+#    
+#                for i in range(outputs.shape[0]):
+#                    output_seq = outputs[i].cpu().numpy()
+#    
+#                    # Find last token not equal to pad_token_id
+#                    non_pad_indices = np.where(output_seq != pad_token_id)[0]
+#                    if len(non_pad_indices) == 0:
+#                        last_token_id = pad_token_id
+#                    else:
+#                        last_token_id = output_seq[non_pad_indices[-1]]
+#    
+#                    predictions.append(last_token_id)
+#    
+#                    # Optional: decode to string if needed
+#                    decoded = self.processing_class.decode([last_token_id], skip_special_tokens=True)
+#                    decoded_predictions.append(decoded)
+#    
+#        return {
+#            #"token_predictions": predictions,
+#            "predictions": decoded_predictions,
+#        }
+
 
 
         
