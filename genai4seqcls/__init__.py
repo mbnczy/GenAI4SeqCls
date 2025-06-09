@@ -1,3 +1,6 @@
+__version__ = "1.0.1"
+__author__ = 'Martin Balázs Bánóczy'
+
 import os
 os.environ["UNSLOTH_IS_PRESENT"] = "1"
 os.environ["WANDB_WATCH"]="all"
