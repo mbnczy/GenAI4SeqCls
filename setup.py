@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='genai4seqcls',
-    version='1.0.1',    
+    version='1.0.2',    
     description='The library is built as a subclass of Huggingface’s Trainer, tailored for encoder-style fine-tuning of generative transformer models on sequence classification tasks. It enhances the standard training loop with features like a dedicated classification head, RAG (Retrieval-Augmented Generation) integrated predictions, and label-balanced batch sampling. The framework also includes advanced callbacks for improved experiment monitoring and real-time notifications.',
     url='https://github.com/mbnczy/GenAI4SeqCls',
     author='Martin Balázs Bánóczy',
