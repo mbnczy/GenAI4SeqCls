@@ -419,7 +419,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
     def predict(self, test_dataset, batch_size=1, input_col="instruction", top_k=10, rag_weight=0.0, **kwargs):
         self.model.eval()
         assert not self.model.training
-        print(self.label2tokenid)
+        #print(self.label2tokenid)
 
     
         predictions = []
@@ -434,8 +434,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         rag_only_scores = []
         rag_only_top_tokens = []
 
-        print("test_Dataset order")
-        print(test_dataset["label"])
+        #print("test_Dataset order")
     
         dataloader = DataLoader(
             test_dataset,
@@ -444,8 +443,8 @@ class SFTTrainerForSeqCLS(SFTTrainer):
             shuffle=False,
             num_workers=0
         )
-        print("Dataloader order")
-        print([batch["labels"] for batch in dataloader])
+        #print("Dataloader order")
+        #print([batch["labels"] for batch in dataloader])
     
         text_loader = DataLoader(test_dataset['text'], batch_size=batch_size, shuffle=False, num_workers=0)
     
@@ -493,10 +492,13 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                         rag_sim_scores = []
     
                         for label in self.label2tokenid.keys():
-                            index, _ = self.rag_label_to_faiss[label]
-                            emb = self.rag_model.encode([rag_input_text], normalize_embeddings=True)
-                            sims, _ = index.search(emb, k=1)
-                            rag_sim_scores.append(sims[0][0])
+                            if label in self.rag_label_to_faiss:
+                                index, _ = self.rag_label_to_faiss[label]
+                                emb = self.rag_model.encode([rag_input_text], normalize_embeddings=True)
+                                sims, _ = index.search(emb, k=1)
+                                rag_sim_scores.append(sims[0][0])
+                            else:
+                                rag_sim_scores.append(0.5)  # Default similarity
     
                         rag_sim_tensor = torch.tensor(rag_sim_scores, device=self.device)
                         rag_probs = F.softmax(rag_sim_tensor, dim=0)
@@ -528,7 +530,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                     predictions.append(final_topk_tokens[0])
                     softmax_scores.append(final_topk_scores[0])
                     top_tokens.append(list(zip(final_topk_tokens, final_topk_scores)))
-    
+
         return {
             "predictions": predictions,
             "softmax_scores": softmax_scores,
