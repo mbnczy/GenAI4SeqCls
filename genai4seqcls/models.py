@@ -125,7 +125,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         focal_loss_weight=0.0,
         label_balance_logic = False,
         cl_head = False,
-        dataset_label_field = 'label',
+        dataset_label_field = "label",
         data_collator = None,
         tokenizer = None,
         preprocess_logits_for_metrics = None,
@@ -134,7 +134,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         eval_dataset = None,
         rag_dataset = None,
         model_name_or_path=None,
-        rag_model = 'all-MiniLM-L6-v2',
+        rag_model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         wandb = None,
         *args, **kwargs
     ):
