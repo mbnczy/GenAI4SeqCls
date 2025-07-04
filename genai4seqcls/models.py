@@ -26,8 +26,13 @@ from collections import defaultdict
 from tqdm.auto import tqdm
 
 from .balancing_methods import LabelBalancedBatchSampler
+from datasets import Dataset
 
-
+class DummyDataset(torch.utils.data.Dataset):
+    def __len__(self): return 1
+    def __getitem__(self, idx):
+        return {"input_ids": [0], "attention_mask": [1], "labels": 0}
+        
 #@dataclass
 #class DataCollator:
 #    tokenizer: Any
@@ -72,8 +77,20 @@ class DataCollator:
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         # Extract fields in original order
         input_ids = [example["input_ids"] for example in batch]
-        attention_masks = [example["attention_mask"] for example in batch]
-        labels_raw = [example[self.dataset_label_field] for example in batch]
+        try:
+            attention_masks = [example["attention_mask"] for example in batch]
+        except:
+            #print(batch)
+            attention_masks = None
+            
+        try:
+            labels_raw = [example[self.dataset_label_field] for example in batch]
+        except:
+            #print("here is a batch:")
+            print(batch)
+            #print("ads")
+            labels_raw = None
+            
         labels = torch.tensor(
             [self.label2tokenid[label] for label in labels_raw],
             dtype=torch.long
@@ -113,6 +130,8 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         tokenizer = None,
         preprocess_logits_for_metrics = None,
         compute_metrics = None,
+        train_dataset = None,
+        eval_dataset = None,
         rag_dataset = None,
         model_name_or_path=None,
         rag_model = 'all-MiniLM-L6-v2',
@@ -170,6 +189,8 @@ class SFTTrainerForSeqCLS(SFTTrainer):
                 label2tokenid = self.label2tokenid
             ),
             compute_metrics = compute_metrics,
+            train_dataset = train_dataset if train_dataset is not None else Dataset.from_dict({"text": [" "],"label": [0]}),
+            eval_dataset = eval_dataset if eval_dataset is not None else Dataset.from_dict({"text": [" "],"label": [0]}),
             *args,
             **kwargs
         )
