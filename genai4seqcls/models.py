@@ -124,7 +124,7 @@ class SFTTrainerForSeqCLS(SFTTrainer):
         ce_loss_weight=1.0,
         focal_loss_weight=0.0,
         label_balance_logic = False,
-        cl_head = True,
+        cl_head = False,
         dataset_label_field = 'label',
         data_collator = None,
         tokenizer = None,
