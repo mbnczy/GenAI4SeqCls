@@ -54,6 +54,7 @@ def density_plot_per_label(dataset, save_as, inst_col = "input_ids", label_col =
         for example in dataset
     ]
     df = pd.DataFrame(lengths_by_label)
+    df["label"] = df["label"].astype(str)
     
     unique_labels = sorted(df['label'].unique())
     palette = sns.color_palette("husl", len(unique_labels))
