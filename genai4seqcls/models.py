@@ -75,42 +75,34 @@ class DataCollator:
     dataset_label_field: str = "label"
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        # Extract fields in original order
         input_ids = [example["input_ids"] for example in batch]
-        try:
-            attention_masks = [example["attention_mask"] for example in batch]
-        except:
-            #print(batch)
-            attention_masks = None
-            
-        try:
-            labels_raw = [example[self.dataset_label_field] for example in batch]
-        except:
-            #print("here is a batch:")
-            print(batch)
-            #print("ads")
-            labels_raw = None
-            
+        attention_masks = [example.get("attention_mask") for example in batch]
+
+        if all(self.dataset_label_field not in example for example in batch):
+            labels_raw = [None for example in batch]
+        else:
+            labels_raw = [
+                example.get(self.dataset_label_field, None)
+                for example in batch
+            ]
         labels = torch.tensor(
-            [self.label2tokenid[label] for label in labels_raw],
+            [self.label2tokenid[label] if label is not None else -100 for label in labels_raw],
             dtype=torch.long
         )
 
-        # Confirm order is maintained
-        #print(f"{labels_raw}->{labels.tolist()}")
-
-        # Pad input sequences
         batch_encoding = self.tokenizer.pad(
             {
                 "input_ids": input_ids,
-                "attention_mask": attention_masks,
+                "attention_mask": attention_masks if attention_masks[0] is not None else None,
             },
             padding=self.padding,
             max_length=self.max_length,
             return_tensors="pt",
         )
 
-        batch_encoding["labels"] = labels
+        if labels is not None:
+            batch_encoding["labels"] = labels
+
         return batch_encoding
 
 
