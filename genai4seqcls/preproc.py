@@ -42,10 +42,13 @@ def preprocess_instruction(example, prompt_template, tokenizer, max_seq_length, 
         max_length=max_seq_length
     )
     tokenized["instruction"]=instruction
-    tokenized["output"] = tokenizer(
-        str(example[label_col]),
-        add_special_tokens=False
-    )["input_ids"][0]
+    if label_col in example:
+        tokenized["output"] = tokenizer(
+            str(example[label_col]),
+            add_special_tokens=False
+        )["input_ids"][0]
+    else:
+        tokenized["output"] = None
 
     return tokenized
 
