@@ -42,6 +42,9 @@ class LabelBalancedBatchSampler(Sampler):
 
 
 class BalancedTrainer(Trainer):
+    def __init__(self, *args, label_col_name: str = "labels", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.label_col_name = label_col_name
     def get_train_dataloader(self):
         sampler = LabelBalancedBatchSampler(
             labels=self.train_dataset['labels'],
